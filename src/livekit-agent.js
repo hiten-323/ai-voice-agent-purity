@@ -92,6 +92,79 @@ function buildTTS(lang) {
   });
 }
 
+// LLM provider factory.
+//
+// The openai plugin is an OpenAI-PROTOCOL client, not a vendor: baseURL and
+// apiKey point it at anything speaking the same API. That keeps this stack at
+// LiveKit + Sarvam + Plivo plus an LLM the business already pays for, instead
+// of opening an OpenAI account for the sake of one class. The Sarvam plugin
+// cannot fill this slot -- at 1.2.6 it exports STT and TTS only, and the whole
+// @livekit/agents-* family is pinned there.
+//
+// maxCompletionTokens, NOT maxTokens. The previous code passed maxTokens: 60,
+// which is not in LLMOptions and was therefore silently dropped -- the model
+// had no ceiling at all on a live phone call.
+function buildLLM() {
+  const provider = (process.env.VOICE_LLM_PROVIDER || 'sarvam').toLowerCase();
+  const temperature = 0.6;
+  const maxCompletionTokens = 60;   // one conversational turn, not an essay
+
+  if (provider === 'sarvam') {
+    // Sarvam serves STT, TTS and the LLM, so the whole stack is
+    // LiveKit + Sarvam + Plivo with one key. Measured, not assumed:
+    //
+    //   sarvam-105b-conversations  2.1s  finish=stop    no reasoning leak
+    //   sarvam-105b                2.3s  finish=length  reasoning, empty content
+    //   nvidia nemotron-3.5        3.1s  finish=length  reasoning, empty content
+    //
+    // The '-conversations' suffix is load-bearing. The plain model is a
+    // reasoning variant that spends the whole token budget thinking and
+    // returns nothing -- on a phone call that is silence, or worse, the
+    // model's monologue read aloud to a prospect.
+    console.log('[llm] provider=sarvam model=sarvam-105b-conversations');
+    return new openai.LLM({
+      model: process.env.SARVAM_LLM_MODEL || 'sarvam-105b-conversations',
+      apiKey: process.env.SARVAM_API_KEY,
+      baseURL: 'https://api.sarvam.ai/v1',
+      temperature,
+      maxCompletionTokens,
+    });
+  }
+
+  if (provider === 'cerebras') {
+    console.log('[llm] provider=cerebras model=llama-3.3-70b');
+    return openai.LLM.withCerebras({
+      model: 'llama-3.3-70b',
+      apiKey: process.env.CEREBRAS_API_KEY,
+      temperature,
+    });
+  }
+
+  if (provider === 'openai') {
+    console.log('[llm] provider=openai model=gpt-4o-mini');
+    return new openai.LLM({
+      model: 'gpt-4o-mini',
+      apiKey: process.env.OPENAI_API_KEY,
+      temperature,
+      maxCompletionTokens,
+    });
+  }
+
+  // NVIDIA NIM. Kept as an option, but NOT the default for voice: the only
+  // model this account can reach is nemotron-3.5-lightning, a reasoning model
+  // that emits its thinking as content. Fine for the backend's batch work,
+  // unusable on a live call.
+  const model = process.env.NVIDIA_MODEL || 'nvidia/nemotron-3.5-lightning-30b-a3b';
+  console.log(`[llm] provider=nvidia model=${model}`);
+  return new openai.LLM({
+    model,
+    apiKey: process.env.NVIDIA_API_KEY,
+    baseURL: process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+    temperature,
+    maxCompletionTokens,
+  });
+}
+
 // Profile-module cache: import once per (profileId, worker process).
 const profileModuleCache = new Map();
 async function loadProfileModule(profileId) {
@@ -225,11 +298,7 @@ export default defineAgent({
     const session = new voice.AgentSession({
       vad: ctx.proc.userData.vad,
       stt: buildSTT(initialLang),
-      llm: new openai.LLM({
-        model: 'gpt-4o-mini',
-        temperature: 0.6,
-        maxTokens: 60,
-      }),
+      llm: buildLLM(),
       tts: buildTTS(initialLang),
       turnDetection: new livekit.turnDetector.MultilingualModel(),
       preemptiveGeneration: true,
