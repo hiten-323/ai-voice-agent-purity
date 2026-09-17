@@ -17,6 +17,18 @@
  * Upstream: https://github.com/livekit/agents-js — @livekit/agents@1.2.6.
  */
 
+// Load .env HERE, explicitly, rather than relying on an accident of import
+// order. server.js "worked" without ever importing dotenv because it pulls
+// in @prisma/client for the scheduler, and Prisma's client runtime loads
+// .env as an internal side effect of its own initialization — nothing to
+// do with this app's own config. This file never touches Prisma, so it
+// got none of that: LIVEKIT_API_KEY/SECRET/URL were genuinely undefined in
+// this process, causing MissingCredentialsError on every startup attempt
+// (found 2026-09-15 via a real test call that rang and stayed silent —
+// this worker had never successfully started before that call). Must be
+// the first import: everything below reads process.env at module load.
+import 'dotenv/config';
+
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   cli,
@@ -31,6 +43,7 @@ import * as elevenlabs from '@livekit/agents-plugin-elevenlabs';
 import * as openai from '@livekit/agents-plugin-openai';
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { getProfile } from './lib/profiles.js';
+import { detectVoicemail } from './lib/voicemail-detection.js';
 
 const WEBHOOK_BASE = process.env.COD_CONFIRM_WEBHOOK_BASE
   || 'https://your-domain.com/ai-voice-agent';
@@ -47,6 +60,19 @@ const DEFAULT_PROFILE_ID = process.env.DEFAULT_AGENT_PROFILE || 'ai-voice-agent'
 // successor to whisper-1 — handles Indian-accented English and code-mix
 // well enough for our domain). OpenAI plugin is already a dependency for
 // the LLM, so no new install.
+// Languages this deployment actually supports end to end (STT + TTS + chat
+// LLM). Not every Sarvam-supported language belongs here — this list is
+// "we have verified all three legs", not "Sarvam's full catalogue".
+const SUPPORTED_LANGS = ['en-IN', 'hi-IN', 'pa-IN'];
+
+// Single source of truth for turning a possibly-missing/unsupported language
+// attribute into one of SUPPORTED_LANGS. Used at both places a call's
+// language gets decided (dispatch metadata and participant attributes) so
+// the two can't drift into checking different sets — see the entrypoint.
+function normalizeLang(raw) {
+  return SUPPORTED_LANGS.includes(raw) ? raw : 'hi-IN';
+}
+
 function buildSTT(lang) {
   if (lang === 'en-IN') {
     console.log(`[stt] provider=openai model=gpt-4o-transcribe lang=${lang}`);
@@ -56,10 +82,13 @@ function buildSTT(lang) {
       detectLanguage: false,
     });
   }
+  // Saaras v3 supports pa-IN directly (23-language set) — passing the real
+  // code through rather than hardcoding hi-IN, which silently ran every
+  // Punjabi call through Hindi transcription before this fix.
   console.log(`[stt] provider=sarvam model=saaras:v3 lang=${lang}`);
   return new sarvam.STT({
     model: 'saaras:v3',
-    languageCode: 'hi-IN',
+    languageCode: lang,
   });
 }
 
@@ -192,23 +221,9 @@ async function loadProfileModule(profileId) {
 // Voicemail detection — engine-level, applies to every profile. Real call
 // #2953 (Storico) burned 2 minutes pitching to a voicemail recording before
 // we added this. Patterns are broad: partial match anywhere in any of the
-// first 4 user transcripts triggers an immediate hangup.
-const VOICEMAIL_PATTERNS = [
-  /व[ोॉ]इस[\s\-]*मे/,
-  /फ[ॉो]रवर्डेड\s+टू/,
-  /न[ॉो]ट\s+अव[ेै]लेबल/,
-  /रिक[ॉो]र्ड\s+य[ोौ]र\s+म[ैे]सेज/,
-  /लीव\s+अ\s+म[ैे]सेज/,
-  /एट\s+द\s+ट[ोौ]न/,
-  /आफ्टर\s+द\s+बीप/,
-  /व्हेन\s+य[ोौ]\s+ह[ैै]व\s+फिनिश्ड/,
-  /इस\s+समय\s+उपलब्ध\s+नहीं/,
-  /कृपया\s+संदेश\s+छोड़/,
-  /voicemail|voice\s*mail/i,
-  /answering\s*machine/i,
-  /please\s+(record|leave)\s+(your\s+)?(message|name)/i,
-  /(after|at)\s+the\s+(tone|beep)/i,
-];
+// first 4 user transcripts triggers an immediate hangup. Detection logic
+// lives in lib/voicemail-detection.js so it can be unit-tested without
+// pulling in the LiveKit CLI (importing this file runs cli.runApp()).
 
 export default defineAgent({
   prewarm: async (proc) => {
@@ -250,7 +265,7 @@ export default defineAgent({
     } catch (err) {
       console.warn('[dispatch-meta] could not parse:', err.message);
     }
-    const initialLang = dispatchMeta.lang === 'en-IN' ? 'en-IN' : 'hi-IN';
+    const initialLang = normalizeLang(dispatchMeta.lang);
     console.log(`[entry] dispatch lang=${initialLang} profile=${dispatchMeta.profile || '?'}`);
 
     const ctxMut = {
@@ -300,6 +315,17 @@ export default defineAgent({
       stt: buildSTT(initialLang),
       llm: buildLLM(),
       tts: buildTTS(initialLang),
+      // Re-enabled 2026-09-15: removed earlier the same day after "File not
+      // found in cache" for revision v0.4.1-intl crashed the worker on every
+      // startup. Root cause wasn't a permanent upstream bug — the crash-loop
+      // itself was racing download-files' cache-ref write (hf_utils.js writes
+      // storageFolder/refs/<tag> -> <commit-hash> after fetching), so restarts
+      // kept catching that mapping half-written. Confirmed fixed: refs/v0.4.1-intl
+      // and refs/v1.2.2-en both now resolve to snapshots that exist on disk
+      // with the model file present (396MB / 65MB respectively). Better
+      // end-of-turn detection than VAD alone matters most exactly where this
+      // was reported missing: distinguishing a mid-sentence pause from an
+      // actual turn end in Hindi/Hinglish conversational cadence.
       turnDetection: new livekit.turnDetector.MultilingualModel(),
       preemptiveGeneration: true,
       aecWarmupDuration: 500,
@@ -311,6 +337,12 @@ export default defineAgent({
     let hangupTimer = null;
     let voicemailDetected = false;
     let userTurnCount = 0;
+    // Set the moment ANY outcome — record_call_outcome or the engine's own
+    // VOICEMAIL report — is on its way to Python. Checked on session Close
+    // so a dropped call, a crash, or the caller just hanging up mid-sentence
+    // still produces a FAILED record instead of vanishing with no trace,
+    // same reasoning as the voicemail fix just above it.
+    let outcomeReported = false;
     const autoHangupMs = parseInt(process.env.AUTO_HANGUP_MS || '10000', 10);
 
     function hangupNow(reason) {
@@ -337,10 +369,10 @@ export default defineAgent({
       userTurnCount++;
 
       if (!voicemailDetected && userTurnCount <= 4) {
-        const matched = VOICEMAIL_PATTERNS.find(p => p.test(transcript));
+        const matched = detectVoicemail(transcript);
         if (matched) {
           voicemailDetected = true;
-          console.log(`[voicemail] detected on user turn #${userTurnCount}: "${transcript}" (matched ${matched})`);
+          console.log(`[voicemail] detected on user turn #${userTurnCount}: "${transcript}" (${matched.kind}: ${matched.matched})`);
           postTurn({
             role: 'tool',
             text: 'voicemail_detected',
@@ -348,6 +380,18 @@ export default defineAgent({
             tool_args: { transcript },
             tool_result: 'hangup',
           });
+          // Before this, a voicemail hit hung up with ZERO record on the
+          // Python side: ai_call_count never incremented, no CallHistory
+          // row, nothing in founder_call_pipeline at all for a call that
+          // did in fact happen. reportOutcome() is the same function the
+          // LLM's record_call_outcome tool calls — this is the engine
+          // calling it directly for an outcome the model never gets a
+          // meaningful turn to decide.
+          outcomeReported = true;
+          if (ctxMut.profileMod && typeof ctxMut.profileMod.reportOutcome === 'function') {
+            ctxMut.profileMod.reportOutcome(ctxMut.v, 'VOICEMAIL', `voicemail greeting matched: "${transcript.slice(0, 200)}"`)
+              .catch(err => console.warn('[voicemail] reportOutcome failed:', err.message));
+          }
           hangupNow('voicemail detected');
           return;
         }
@@ -358,6 +402,28 @@ export default defineAgent({
         text: transcript,
         stt_confidence: typeof ev.confidence === 'number' ? ev.confidence : undefined,
       });
+    });
+
+    // Real per-stage latency, from the SDK's own instrumentation rather than
+    // a guess. Before this listener existed, nothing in this codebase ever
+    // read AgentSessionEventTypes.MetricsCollected -- "the call feels slow"
+    // had no numbers behind it because nothing was logging the numbers the
+    // framework was already computing on every turn. eou = time from the
+    // caller going silent to the turn being considered over; llm.ttftMs =
+    // time to the model's first token (not durationMs, which includes the
+    // whole completion and streams to TTS incrementally); tts.ttfbMs = time
+    // to the first audio byte the caller actually hears.
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
+      const m = ev.metrics;
+      if (m.type === 'eou_metrics') {
+        console.log(`[latency] eou endOfUtteranceDelayMs=${m.endOfUtteranceDelayMs} transcriptionDelayMs=${m.transcriptionDelayMs} onUserTurnCompletedDelayMs=${m.onUserTurnCompletedDelayMs}`);
+      } else if (m.type === 'llm_metrics') {
+        console.log(`[latency] llm ttftMs=${m.ttftMs} durationMs=${m.durationMs} completionTokens=${m.completionTokens} tokensPerSecond=${m.tokensPerSecond.toFixed(1)}`);
+      } else if (m.type === 'tts_metrics') {
+        console.log(`[latency] tts ttfbMs=${m.ttfbMs} durationMs=${m.durationMs} audioDurationMs=${m.audioDurationMs} streamed=${m.streamed}`);
+      } else if (m.type === 'stt_metrics') {
+        console.log(`[latency] stt durationMs=${m.durationMs} audioDurationMs=${m.audioDurationMs} streamed=${m.streamed}`);
+      }
     });
 
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
@@ -401,6 +467,20 @@ export default defineAgent({
         });
         if (ctxMut.profileMod && ctxMut.profileMod.TERMINAL_TOOLS.has(c.name)) {
           terminalToolFired = true;
+          // Bug found via the 2026-09-15 controlled test call: this used to
+          // set outcomeReported = true just because the TOOL NAME matched,
+          // regardless of whether execute() actually reached Python. That
+          // call's webhook POST got HTTP 404 (purity-api was running from
+          // before the route existed) — the tool "fired" by every log here,
+          // but the Close handler's FAILED-fallback below never ran, because
+          // this flag had already (wrongly) claimed something succeeded.
+          // Checking the tool's own returned {ok} is the only way to know.
+          const succeeded = c.result && typeof c.result === 'object' && c.result.ok === true;
+          if (succeeded) {
+            outcomeReported = true;
+          } else {
+            console.warn(`[auto-hangup] terminal tool ${c.name} fired but did not report a successful outcome (result: ${JSON.stringify(c.result)}) — leaving outcomeReported=false so Close still reports FAILED`);
+          }
           console.log(`[auto-hangup] armed after terminal tool: ${c.name}`);
         }
       }
@@ -412,6 +492,22 @@ export default defineAgent({
         hangupTimer = null;
       }
       console.log(`[livekit-agent] session closed after ${ctxMut.turnIndex} turns`);
+
+      // Every completed conversation should produce an auditable outcome —
+      // a dropped call, a crash, or the caller hanging up mid-question
+      // shouldn't leave Python with zero trace that a call ever happened.
+      // Only fires when nothing else already reported (record_call_outcome
+      // or the voicemail path above), and only when there was actually a
+      // lead to report against — a sandbox call with no lead_id has nothing
+      // for reportOutcome to attach to anyway.
+      if (!outcomeReported && ctxMut.v?.lead_id && ctxMut.profileMod
+          && typeof ctxMut.profileMod.reportOutcome === 'function') {
+        outcomeReported = true;
+        ctxMut.profileMod.reportOutcome(
+          ctxMut.v, 'FAILED',
+          `session closed after ${ctxMut.turnIndex} turn(s) with no outcome recorded`,
+        ).catch(err => console.warn('[close] reportOutcome(FAILED) failed:', err.message));
+      }
     });
 
     // Serial start (the previous parallel-start attempt killed AgentActivity
@@ -421,7 +517,7 @@ export default defineAgent({
     const attrs = participant.attributes || {};
 
     ctxMut.profileId = attrs.profile || DEFAULT_PROFILE_ID;
-    ctxMut.lang = attrs.language === 'en-IN' ? 'en-IN' : 'hi-IN';
+    ctxMut.lang = normalizeLang(attrs.language);
     ctxMut.sipCallId = attrs.sip_call_id || null;
 
     let profileMod;

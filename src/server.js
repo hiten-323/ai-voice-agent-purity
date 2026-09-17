@@ -21,6 +21,13 @@
  * the registry that auto-discovers profiles/<id>/profile.json at boot.
  */
 
+// Explicit, rather than relying on the accidental side effect of importing
+// @prisma/client below (Prisma's runtime loads .env internally for its own
+// DATABASE_URL, which happened to also populate process.env for everything
+// else in this file — see livekit-agent.js for the sibling process where
+// that accident did NOT hold and every LiveKit credential was undefined).
+import 'dotenv/config';
+
 import express from 'express';
 import crypto from 'node:crypto';
 import pkg from '@prisma/client';

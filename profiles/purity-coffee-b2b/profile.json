@@ -1,0 +1,32 @@
+{
+  "id": "purity-coffee-b2b",
+  "name": "Purity Beans — B2B coffee qualification",
+  "description": "One disclosed AI call to a business that published its number, to find out whether they buy coffee commercially and whether they want the founder to call. It does not sell, quote, or close.",
+
+  "languages": ["hi-IN", "en-IN", "pa-IN"],
+  "defaultLanguage": "hi-IN",
+
+  "_script_note": [
+    "The opening line and the questions are NOT defined here.",
+    "They live in purity-revenue-os founder_call_pipeline.py as",
+    "OPENING_DISCLOSURE and QUALIFICATION_QUESTIONS, and arrive in the",
+    "dispatch payload under payload.opening / payload.questions.",
+    "",
+    "That is deliberate. A second copy here would drift from the Python one,",
+    "and the Python one is the copy that script_discloses() validates for the",
+    "AI disclosure. A profile that carried its own opening line could quietly",
+    "drop that disclosure while every test still passed."
+  ],
+
+  "_disclosure_note": [
+    "The opening must identify the caller as AI and name the business.",
+    "founder_call_pipeline.script_discloses() enforces both and refuses to",
+    "dispatch otherwise."
+  ],
+
+  "_scope_note": [
+    "Qualification only. Interest routes to a human via the founder queue;",
+    "the AI never negotiates price or takes an order. A wrong email is a",
+    "wrong email — a wrong call is a real phone ringing in a real shop."
+  ]
+}
