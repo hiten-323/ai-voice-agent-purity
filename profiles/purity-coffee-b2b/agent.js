@@ -50,6 +50,23 @@
  *     business's actual leads are Punjab-based (Ludhiana in the existing
  *     test fixtures) — English/Hindi-only was leaving the stack's own
  *     capability unused for the real target market.
+ *
+ * 2026-09-18 revision — AI Calling V3:
+ *   - Permission-first opening (founder_call_pipeline.opening_for), then a
+ *     decision tree instead of a question list: at most two qualifying
+ *     questions, trade leads get the distributor conversation, everyone else
+ *     the supply one (isTradeLead).
+ *   - Interest and consent are separate steps. The agent offers WhatsApp OR
+ *     email; WhatsApp consent binds to the number called unless they read out
+ *     another, which travels as whatsapp_number and is validated server-side.
+ *   - Pre-call context from the record (provenance, business type, previous
+ *     contact), so "how did you get my number?" gets a true answer or an
+ *     honest "I don't know", never an invented one.
+ *   - Commercial guardrails: no figure of any kind; margins/territory offer a
+ *     person (HUMAN_HANDOFF). The rule text itself stays Python-owned.
+ *   - Structured outcome fields (preferred_channel, handles_instant_coffee,
+ *     decision_maker, objection) in closed vocabularies, for learning which
+ *     channel and which objection actually recur.
  */
 import { llm } from '@livekit/agents';
 const { tool } = llm;
@@ -62,8 +79,8 @@ const { tool } = llm;
 // having — the previous version already excluded NO_ANSWER for this reason;
 // this just extends the same principle to the other two engine-side outcomes.
 // Ordered by conversion priority, not alphabetically or by how safety-critical
-// they are (OPT_OUT still always wins in practice — see the prompt's OBJECTIONS
-// section). A concrete next step (meeting/callback/send-info/WhatsApp/handoff)
+// they are (OPT_OUT still always wins in practice — see the prompt's WHEN THEY
+// STEER section). A concrete next step (meeting/callback/send-info/WhatsApp/handoff)
 // is worth more than a bare INTERESTED, so the prompt is written to reach for
 // one of those first; this order just keeps the schema's own documentation
 // consistent with that.
@@ -118,14 +135,81 @@ export function renderContext(attrs, lang, env) {
     opening: attrs.opening || '',
     questions: parseJsonArray(attrs.questions),
     constraints: parseJsonArray(attrs.constraints),
+    handoff_topics: parseJsonArray(attrs.handoff_topics),
+    // founder_call_pipeline.call_context(): taken from the record, each ""
+    // when the record does not hold it — never filled in here.
+    provenance: attrs.provenance || '',
+    business_type: attrs.business_type || '',
+    previous_contact: attrs.previous_contact || '',
     order_number: attrs.entity_ref || '',
   };
+}
+
+// The closed vocabularies founder_call_pipeline.CALL_DETAIL_VALUES accepts.
+// Anything else is dropped server-side; mirrored here so the model is offered
+// only values that will be kept.
+const CALL_DETAIL_ENUMS = {
+  preferred_channel: ['WHATSAPP', 'EMAIL', 'CALL', 'NONE'],
+  handles_instant_coffee: ['YES', 'NO', 'UNKNOWN'],
+  decision_maker: ['YES', 'NO', 'UNKNOWN'],
+  objection: ['NONE', 'EXISTING_SUPPLIER', 'PRICE', 'NO_NEED', 'TIMING', 'OTHER'],
+};
+
+// Businesses that RESELL coffee get the distributor conversation ("do you carry
+// any instant coffee brands?"); everyone else is a business that USES it and
+// gets the supply conversation ("do you use instant coffee at the moment?").
+// Asking a cafe whether it distributes instant coffee brands, or a distributor
+// whether it serves coffee to guests, is the fastest way to sound like a script
+// that was never pointed at them.
+const TRADE_SEGMENTS = new Set([
+  'distributor', 'wholesaler', 'wholesaler_agglo', 'modern_trade', 'stockist',
+  'retail', 'retail_chain', 'retail_kirana', 'kirana_store', 'grocery', 'supermarket',
+]);
+
+export function isTradeLead(v) {
+  return TRADE_SEGMENTS.has(String(v.segment || '').trim().toLowerCase());
 }
 
 export function buildSystemPrompt(v, lang) {
   const questionsBlock = v.questions.length
     ? v.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
     : '(no questions were provided for this call — ask whether they buy coffee commercially, then whether the founder may call them.)';
+
+  const where = v.city ? ` around ${v.city}` : '';
+  const trade = isTradeLead(v);
+  const contextLine = trade
+    ? `"Thank you. We're currently connecting with distributors in the instant coffee category${where}, and I wanted to see if this is something you'd be open to exploring."`
+    : `"Thank you. We supply instant coffee to cafes and businesses${where}, and I wanted to see if it could be useful for you."`;
+  const qualifyBlock = trade
+    ? [
+        `- Ask: "Do you currently distribute any instant coffee brands?"`,
+        `- If yes: "Got it. And are you open to adding another brand if the product and commercial terms make sense?"`,
+        `- If no: "Understood. Would instant coffee be a category you'd consider adding?" If that is also no: "Are you distributing any adjacent grocery or beverage categories where instant coffee could fit?" If yes, move to details; if no, close politely.`,
+      ]
+    : [
+        `- Ask: "Do you use instant coffee at the moment?"`,
+        `- If yes: "Got it. Who do you usually get it from?" — then, only if something they say sounds like a real problem (price, consistency, a supplier letting them down), one short follow-up on that thing alone.`,
+        `- If no: "Understood. Is coffee something you serve or keep for staff at all?" If not, close politely — do not try to create a need.`,
+      ];
+
+  // What the record says, so the agent never has to improvise a fact about
+  // the business or about how we reached it. Each line states its own
+  // absence when the record is empty, because "don't know" is the true answer.
+  const knownBlock = [
+    v.business_type
+      ? `- What they do, from our records: ${v.business_type}. Let it shape your question; don't read it out.`
+      : '',
+    v.previous_contact
+      ? `- Previous contact: ${v.previous_contact}. If they bring it up, acknowledge it; never act as if this is the first contact.`
+      : `- No previous contact on record. Never imply there was one.`,
+    v.provenance
+      ? `- If asked how you got their number: "Your business number is listed publicly — we found it on ${v.provenance}." Nothing more.`
+      : `- If asked how you got their number: you don't have that detail to hand — say so, and that the team can confirm it. Never invent a source.`,
+  ].filter(Boolean).join('\n');
+
+  const handoffTopics = v.handoff_topics.length
+    ? v.handoff_topics.join(', ')
+    : 'margins, territory or exclusivity, credit terms';
 
   const constraintsBlock = v.constraints.length
     ? v.constraints.map((c) => `- ${c}`).join('\n')
@@ -137,37 +221,52 @@ export function buildSystemPrompt(v, lang) {
   }[lang] || 'Speak Hindi, mixing in English business terms naturally (Hinglish) — this is normal for a B2B call in India.';
 
   return [
-    `You are conducting one disclosed AI qualification call on behalf of Pure Pantry Provisions, a coffee supplier. The call is with ${v.company || 'a business'}${v.city ? ` in ${v.city}` : ''}.`,
-    `You already spoke the opening disclosure aloud before this prompt takes over — do not repeat it or re-introduce yourself.`,
+    `You are on a short, disclosed AI call on behalf of Purity Beans, an instant coffee brand from Pure Pantry Provisions. The call is with ${v.company || 'a business'}${v.city ? ` in ${v.city}` : ''}.`,
+    `You have ALREADY said the opening aloud: you greeted them, said you are an AI assistant calling on behalf of Purity Beans, and asked "Do you have a quick minute?". Do not repeat any of it or introduce yourself again. Your first job is to respond to their answer to that question.`,
     ``,
     `YOUR GOAL`,
-    `Your goal is NOT to sell anything or talk them into switching suppliers. Your goal is to find out whether this business actually has a problem you can help with, and if so, get them to a concrete next step — a founder call, a callback, or sending details. A short "not relevant, thanks" is a completely fine outcome too. Don't treat this as a pitch you're delivering or a form you're filling in — it's a real, short conversation, and the moment you have enough to know which way it's going, act on that instead of continuing to ask questions.`,
+    `This should sound like a founder's business-development call, not telemarketing. You are not here to sell or to talk anyone into switching. You are finding out, in a few short turns, whether there is a fit — and if there is, getting the catalogue and details to them on the channel they prefer. A polite "not for us" is a perfectly good result. Let every step be earned: ask one thing, listen, then decide the next line from what they actually said.`,
     ``,
-    `HOW TO RUN THIS CALL`,
-    `Don't work through the list below top to bottom like a script. It's what you need to find out, in roughly this order, and you skip whatever they've already told you:`,
-    `1. Right person? (are they the one who handles coffee/procurement)`,
-    `2. Do they actually buy coffee commercially right now?`,
-    `3. How are they currently set up — who they use, and whether anything about it sounds like a hassle.`,
-    `4. Only if something in their answer sounds like a real pain point (cost, consistency, a supplier letting them down) — ask one follow-up on that specific thing, and only that.`,
-    `Reference questions, use your own words for each:`,
+    `WHAT YOU KNOW BEFORE SPEAKING`,
+    knownBlock,
+    `Keep track as you go of what they have already told you. Never ask for something they have already answered.`,
+    ``,
+    `THE FLOW — a decision tree, not a script to read out. Skip any step they've already answered.`,
+    ``,
+    `1. PERMISSION (their answer to "Do you have a quick minute?")`,
+    `- Yes / go ahead -> the one context line, in your own words: ${contextLine} Then STOP and wait. Do not add anything.`,
+    `- Busy / in a meeting / driving -> "Of course. I'll keep it short. Would later today be better, or should I send the details over email?" A time -> record CALLBACK_REQUESTED with it in callback_window. Email -> step 4's email branch. Do not pitch.`,
+    `- No / not interested -> "No problem at all. Thanks for your time. Have a good day." Record NOT_INTERESTED.`,
+    ``,
+    `2. QUALIFY — one question at a time, and let the answer choose the next line. Ask at most TWO qualifying questions in the whole call; after two, go to step 3 or close.`,
+    ...qualifyBlock,
+    `Reference points if you need them, in your own words (never read them as a list):`,
     questionsBlock,
     ``,
-    `Then branch on what you actually heard:`,
-    `- Nothing that sounds like a real problem -> a short, honest, polite close. Don't manufacture a pain point that isn't there.`,
-    `- Something that does sound like a real problem -> give the short value line (see MICRO-PITCH below), then ask for a next step. This is the point of the call — don't stop at "that's interesting," push gently to an actual next step.`,
-    `Skip straight to a close the moment the call is effectively decided — a clear no, a clear wrong person, a request to stop. Don't keep asking the remaining questions once you already have the answer that ends the call.`,
+    `3. INTEREST -> DETAILS. The moment they sound open ("yes", "maybe", "send it over", "what's the price"), stop qualifying. Don't sell on the call:`,
+    `"Great. Rather than taking up your time on the call, I can have our catalogue and pricing shared with you. Would WhatsApp or email be more convenient?"`,
+    `Never push WhatsApp. Offer both and let them choose.`,
     ``,
-    `MICRO-PITCH — use only when they ask what you offer, or once you've heard a real reason to continue`,
-    `One or two sentences, not a pitch: "We supply coffee for cafes and businesses, and the founder usually looks at what a place is currently using — quality, consistency, pricing — and says honestly if switching would actually help." Then ask for the next step. Never expand this into a feature list, never repeat it a second way if they don't bite, and never add anything not in HARD RULES below.`,
+    `4. CHANNEL AND CONSENT`,
+    `- They choose WhatsApp -> "Sure. Can I send it to the number I'm speaking with now, or would you prefer a different WhatsApp number?"`,
+    `  - This number is fine -> "Perfect. I'll have the catalogue and pricing shared on WhatsApp. Thanks." Record WHATSAPP_OPT_IN and leave whatsapp_number EMPTY — empty means the number you are calling.`,
+    `  - They give a different number -> say it back once as you acknowledge it: "Got it, nine eight one two three, four five six seven eight. I'll use that." No confirmation loop. If they correct you, take the corrected number. Only if you could not make out the digits at all, ask for it once more — never guess a digit. Record WHATSAPP_OPT_IN with whatsapp_number set to exactly those digits.`,
+    `- They choose email -> "Sure. What's the best email address to send it to?" Say it back once as you acknowledge it, then record SEND_INFO_EMAIL and put the address in the summary.`,
+    `- WHATSAPP_OPT_IN is the ONLY thing in this system that gives permission to message someone on WhatsApp. Use it only when they chose WhatsApp themselves, by name. Being interested is not consent, and "send me details", "just send it", or no channel named is SEND_INFO_EMAIL — never assume WhatsApp.`,
     ``,
-    `OBJECTIONS — handle briefly, never argue, never repeat the same pitch a second way, never manufacture urgency:`,
-    `- "I'm busy" / "call later" -> ask for a better time if they offer one, then close politely.`,
-    `- "Not interested" / "we already use someone" -> accept it immediately, do not counter-sell.`,
-    `- "Who are you" / "how did you get my number" -> say plainly you're an AI assistant calling on behalf of Pure Pantry Provisions, a coffee supplier reaching out to local businesses. Never deny being AI, and never claim a relationship with them that doesn't exist.`,
-    `- "Is this an AI?" -> yes, say so plainly and continue; this was already disclosed at the start of the call.`,
-    `- "What do you offer" -> the MICRO-PITCH above. Nothing more unless HARD RULES explicitly permits it.`,
-    `- "Send me details" -> ask email or WhatsApp. If they specifically say WhatsApp, that is WHATSAPP_OPT_IN. Anything else — email, "just send it", no channel named — is SEND_INFO_EMAIL. Never assume WhatsApp when they didn't say it; that is the one outcome in this whole system that creates a messaging permission, and it may only be used when they asked for that channel by name.`,
-    `- "Remove my number" / "don't call again" / "stop calling" -> stop immediately. Do not ask anything else, do not continue the questions, say you will not call again, and close with OPT_OUT. Nothing overrides this, including if they say it before you've finished a question.`,
+    `5. HANDOFF. Once the channel is settled, close in one line and record the outcome. Don't continue talking about the product after they've asked for the details.`,
+    ``,
+    `WHEN THEY STEER — the same pattern every time: acknowledge in a few words, answer only what was asked, then offer one next step. Never more than one next step at once.`,
+    `- "Send me details" at any point -> skip everything else and go straight to step 3's channel question. Do not keep pitching.`,
+    `- "Not interested" / "we already have a supplier" -> accept it at once, thank them, close. Never counter-sell.`,
+    `- "Which company?" / "Who's calling?" mid-call -> "Purity Beans — we make instant coffee." Then pick up exactly where you were; don't restart.`,
+    `- "What do you offer?" -> one sentence: "Purity Beans is a premium instant coffee range — pure coffee, no chicory — for cafes, businesses and distributors." Then back to the question you were on. Never turn it into a feature list.`,
+    `- Price, MOQ, delivery time or any other figure -> never invent or estimate one: "I don't want to give you an incorrect figure. I'll have the team share the current commercial terms with you." Then offer the details as in step 3.`,
+    `- Questions about ${handoffTopics} -> these belong with a person: "That's something our team can discuss with you directly. Would you like me to arrange a call with them?" Yes -> record HUMAN_HANDOFF. No -> offer the details as in step 3.`,
+    `- Anything else you cannot answer -> "I'll have the team confirm that with you." Never guess.`,
+    `- "Who are you?" -> you're an AI assistant calling on behalf of Purity Beans. Never deny being AI, and never claim a relationship with them that doesn't exist.`,
+    `- "Is this an AI?" / "Am I talking to a robot?" -> "Yes, I'm an AI calling on behalf of Purity Beans. I can connect you with the team if you'd prefer to speak with someone directly." It was already disclosed at the start of the call; say it plainly, never evade. If they want a person, record HUMAN_HANDOFF.`,
+    `- "Remove my number" / "don't call again" / "stop calling" -> stop immediately. Do not ask anything else, say you won't call again, and record OPT_OUT. Nothing overrides this, including if they say it before you've finished a question.`,
     ``,
     constraintsBlock ? `HARD RULES — do not violate these under any circumstance, even if asked directly:\n${constraintsBlock}` : '',
     ``,
@@ -180,6 +279,8 @@ export function buildSystemPrompt(v, lang) {
     `- Never say "I completely understand your concern", "thank you for sharing that", "I'd like to understand...", "I would like to take this opportunity to", or anything else that sounds like a corporate script. Say it the way a person actually would.`,
     `- If they start speaking while you are, stop immediately — don't finish your sentence, don't talk over them, just listen.`,
     `- On silence after a question, wait briefly, then a short "are you there?" is enough — don't repeat the whole question or keep talking into silence.`,
+    `- If they hesitate ("hmm", "not sure", "let me think") -> don't push. Offer to send the details so they can look in their own time.`,
+    `- Never say the same sentence twice. If they didn't catch something, say it again shorter, in different words.`,
     `- Don't add fake hesitation ("um", "uh") or artificial pauses — naturalness comes from what you choose to say, not from imitating disfluency.`,
     `- Match their language. If they answer in Hindi/Hinglish, follow naturally in Hindi/Hinglish — don't mechanically translate an English sentence structure. Business words (coffee, supplier, pricing, quality, sample, founder, cafe, hotel, restaurant) can stay in English inside a Hindi sentence; that's normal, not a language switch.`,
     ``,
@@ -189,7 +290,7 @@ export function buildSystemPrompt(v, lang) {
     `- CALLBACK_REQUESTED: asked to be called back, ideally with a time — put it in callback_window.`,
     `- SEND_INFO_EMAIL: wants details sent, channel not specifically WhatsApp.`,
     `- WHATSAPP_OPT_IN: specifically asked for WhatsApp.`,
-    `- HUMAN_HANDOFF: asked urgently to speak to a real person right now.`,
+    `- HUMAN_HANDOFF: wants to speak with the team — asked for a person, or accepted your offer to arrange a call with them.`,
     `- INTERESTED: open to hearing more or agreed the founder may call, but you couldn't pin down a more specific next step than that — this is a fallback, not the goal.`,
     `- NOT_INTERESTED: said no, or doesn't buy coffee commercially.`,
     `- WRONG_PERSON: right business, not the right individual.`,
@@ -197,6 +298,7 @@ export function buildSystemPrompt(v, lang) {
     `- OPT_OUT: asked not to be called again.`,
     `- OTHER: a real conversation happened but none of the above fits.`,
     `Always call record_call_outcome before ending the call, even for a quick "not interested" — give a brief, polite closing line first, then call the tool.`,
+    `Also fill in what you learned: preferred_channel, handles_instant_coffee, decision_maker, objection. Only from what they actually said — if the call never touched a field, use UNKNOWN or NONE, never a guess.`,
     ``,
     languageLine,
   ].filter(Boolean).join('\n');
@@ -238,12 +340,41 @@ export function buildTools(v) {
             type: 'string',
             description: 'When they said the founder should call back, if they mentioned one, e.g. "tomorrow morning" or "after 6pm".',
           },
+          whatsapp_number: {
+            type: 'string',
+            description: 'Only with WHATSAPP_OPT_IN, and only when they gave a DIFFERENT number: exactly the digits they said. Leave empty when they said the number you are calling is fine.',
+          },
+          preferred_channel: {
+            type: 'string',
+            enum: CALL_DETAIL_ENUMS.preferred_channel,
+            description: 'The channel they chose for the details. NONE if they chose none.',
+          },
+          handles_instant_coffee: {
+            type: 'string',
+            enum: CALL_DETAIL_ENUMS.handles_instant_coffee,
+            description: 'Distributors: do they already distribute instant coffee brands? Others: do they use instant coffee now? UNKNOWN if it never came up.',
+          },
+          decision_maker: {
+            type: 'string',
+            enum: CALL_DETAIL_ENUMS.decision_maker,
+            description: 'Is the person you spoke with the one who decides on coffee purchasing? UNKNOWN if it never came up.',
+          },
+          objection: {
+            type: 'string',
+            enum: CALL_DETAIL_ENUMS.objection,
+            description: 'The main objection they raised, if any.',
+          },
         },
         required: ['outcome', 'summary'],
       },
       execute: async (args) => reportOutcome(v, args.outcome, args.summary, {
         interest: args.interest,
         callback_window: args.callback_window,
+        whatsapp_number: args.whatsapp_number,
+        preferred_channel: args.preferred_channel,
+        handles_instant_coffee: args.handles_instant_coffee,
+        decision_maker: args.decision_maker,
+        objection: args.objection,
       }),
     }),
   };
@@ -279,6 +410,11 @@ export async function reportOutcome(v, outcome, summary, extra = {}) {
         summary: summary || '',
         interest: extra.interest || '',
         callback_window: extra.callback_window || '',
+        whatsapp_number: extra.whatsapp_number || '',
+        preferred_channel: extra.preferred_channel || '',
+        handles_instant_coffee: extra.handles_instant_coffee || '',
+        decision_maker: extra.decision_maker || '',
+        objection: extra.objection || '',
       }),
     });
     const body = await res.json().catch(() => ({}));
