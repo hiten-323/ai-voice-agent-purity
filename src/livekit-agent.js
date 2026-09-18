@@ -553,5 +553,22 @@ cli.runApp(
     agent: fileURLToPath(import.meta.url),
     agentName: process.env.LIVEKIT_AGENT_NAME || 'ai-voice-agent-priya',
     host: process.env.LIVEKIT_AGENT_HTTP_HOST || '127.0.0.1',
+    // The SDK default is 10s, and this worker could not meet it: every runner
+    // logged "runner initialization timed out", its inference and job children
+    // were orphaned, and a real inbound call (jobId AJ_nfaKeEVYupQL, 2026-09-18)
+    // died with ERR_IPC_CHANNEL_CLOSED before anyone joined the room — the phone
+    // rang into silence and no outcome was ever reported.
+    //
+    // A runner has to fork a child, load onnxruntime and load the multilingual
+    // turn-detector model before it reports ready. On this host that is a
+    // Windows box running Node 24 with ~11 of 15.7 GB already in use by the API,
+    // worker, frontend, tunnel and the voice server, so 10s is simply not
+    // enough. The model files were already cached, so this is contention, not a
+    // missing download.
+    //
+    // 60s is chosen to be slower than the worst observed cold start rather than
+    // generous: a runner that genuinely cannot start still fails, just not
+    // before it has had a fair chance.
+    initializeProcessTimeout: Number(process.env.LIVEKIT_INIT_TIMEOUT_MS || 60_000),
   }),
 );
