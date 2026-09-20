@@ -218,9 +218,9 @@ export function buildSystemPrompt(v, lang) {
     : '';
 
   const languageLine = {
-    'en-IN': 'Speak Indian English throughout.',
-    'pa-IN': 'Speak Punjabi, mixing in English business terms naturally — this is normal for a B2B call in Punjab. If Punjabi ever feels forced for a specific phrase, Hindi/Hinglish is an acceptable fallback for that phrase only.',
-  }[lang] || 'Speak Hindi, mixing in English business terms naturally (Hinglish) — this is normal for a B2B call in India.';
+    'en-IN': 'Speak natural Indian English throughout. Keep sentences short and conversational.',
+    'pa-IN': 'Speak natural Punjabi with English business terms where useful. IMPORTANT FOR TTS CLARITY: write Punjabi words in Gurmukhi script, not Roman Punjabi. Keep ordinary English business terms in Latin script.',
+  }[lang] || 'Speak natural Hindi/Hinglish. IMPORTANT FOR TTS CLARITY: write Hindi words in Devanagari, not Roman Hindi. Keep ordinary English business terms (coffee, supplier, pricing, catalogue, WhatsApp, email) in Latin script. Do not transliterate Hindi into Roman letters.';
 
   return [
     `You are on a short, disclosed AI call on behalf of Purity Beans, an instant coffee brand from Pure Pantry Provisions. The call is with ${v.company || 'a business'}${v.city ? ` in ${v.city}` : ''}.`,
@@ -289,6 +289,7 @@ export function buildSystemPrompt(v, lang) {
     `- Never say the same sentence twice. If they didn't catch something, say it again shorter, in different words.`,
     `- Don't add fake hesitation ("um", "uh") or artificial pauses — naturalness comes from what you choose to say, not from imitating disfluency.`,
     `- Match their language. If they answer in Hindi/Hinglish, follow naturally in Hindi/Hinglish — don't mechanically translate an English sentence structure. Business words (coffee, supplier, pricing, quality, sample, founder, cafe, hotel, restaurant) can stay in English inside a Hindi sentence; that's normal, not a language switch.`,
+    `- TTS clarity rule: never write Hindi words in Roman script such as "aap", "haan", "acha", "kya" when speaking Hindi. Use native Devanagari such as "आप", "हाँ", "अच्छा", "क्या". For Punjabi use Gurmukhi. This is a speech-engine requirement, not a formatting preference.`,
     ``,
     `RECORDING THE OUTCOME`,
     `When the conversation reaches a clear result, call record_call_outcome exactly once, near the end, with the outcome that best matches what happened. "Sounds interesting" on its own is not a finished outcome — if there's genuine relevance, ask for a next step before the call ends, and record whichever of these actually happened:`,
