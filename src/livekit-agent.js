@@ -397,8 +397,23 @@ export default defineAgent({
       // end-of-turn detection than VAD alone matters most exactly where this
       // was reported missing: distinguishing a mid-sentence pause from an
       // actual turn end in Hindi/Hinglish conversational cadence.
-      turnDetection: new livekit.turnDetector.MultilingualModel(),
-      preemptiveGeneration: true,
+      // The multilingual turn detector is a 396MB model whose inference runs
+      // in-process alongside VAD. On this host (7 pm2 apps, ~91% RAM) the
+      // 2026-09-20 test call logged "inference is slower than realtime" 564
+      // times, and one TTS generation took 11.1s to produce 8.0s of audio --
+      // audible as robotic, stuttering speech and late replies. STT already
+      // segments on VAD (REST transport), so the detector was buying refined
+      // end-of-utterance decisions the pipeline could not afford. Off by
+      // default here, switchable per deployment: on a host with headroom
+      // TURN_DETECTOR=model is the better answer for Hindi/Hinglish cadence.
+      ...(String(process.env.TURN_DETECTOR || 'vad').toLowerCase() === 'model'
+        ? { turnDetection: new livekit.turnDetector.MultilingualModel() }
+        : {}),
+      // Was true. It re-runs generation when the chat context changes and
+      // logged "preemptive generation enabled but chat context or tools have
+      // changed after onUserTurnCompleted" on the same call -- duplicated LLM
+      // work on a box that is already inference-starved.
+      preemptiveGeneration: false,
       // Keep the agent responsive on short PSTN turns. The interruption
       // thresholds are deliberately modest: callers can correct the agent
       // without having to fight through a full sentence, while short
@@ -610,7 +625,25 @@ export default defineAgent({
     const lang = ctxMut.lang;
     console.log(`[livekit-agent] profile=${ctxMut.profileId} call for ${v.customer_name || '(no name)'} / ${v.order_number || attrs.entity_ref || '-'} lang=${lang}`);
 
-    const realAgent = new voice.Agent({
+    // A VAD segment that transcribes to nothing (a cough, line noise, the
+    // caller's "hmm") still completes a user turn, and the session then sends
+    // that empty string to the LLM. Sarvam rejects it outright:
+    //   400 body.messages.N.user.content : String should have at least 1 character
+    // Every generation attempt failed, so after the opening question the
+    // agent simply stopped answering -- "doesn't move past 1 question",
+    // reported on the 2026-09-20 call where this fired 7 times. StopResponse
+    // is the framework's own way to end a turn without generating.
+    class GuardedAgent extends voice.Agent {
+      async onUserTurnCompleted(chatCtx, newMessage) {
+        const text = (newMessage?.textContent ?? '').trim();
+        if (!text) {
+          console.log('[turn] empty transcript — skipping generation, keeping the floor');
+          throw new voice.StopResponse();
+        }
+      }
+    }
+
+    const realAgent = new GuardedAgent({
       instructions: profileMod.buildSystemPrompt(v, lang),
       tools:        profileMod.buildTools(v, { WEBHOOK_BASE, TOOL_SECRET }),
     });
