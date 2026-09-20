@@ -65,6 +65,21 @@ const DEFAULT_PROFILE_ID = process.env.DEFAULT_AGENT_PROFILE || 'ai-voice-agent'
 // "we have verified all three legs", not "Sarvam's full catalogue".
 const SUPPORTED_LANGS = ['en-IN', 'hi-IN', 'pa-IN'];
 
+// Voice-quality defaults are intentionally conservative for PSTN: natural
+// conversational pace, telephony-compatible sample rate, and Indian-language
+// voices chosen per language. Every value remains environment-overridable so
+// a later A/B test does not require another code change.
+const TTS_PACE = Number(process.env.TTS_PACE || '1.05');
+const TTS_SAMPLE_RATE = Number(process.env.TTS_SAMPLE_RATE || '8000');
+const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.55');
+const SARVAM_STT_MODEL = process.env.SARVAM_STT_MODEL || 'saaras:v4';
+const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
+const SARVAM_SPEAKERS = {
+  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'shubh',
+  'en-IN': process.env.SARVAM_EN_SPEAKER || 'ratan',
+  'pa-IN': process.env.SARVAM_PA_SPEAKER || 'mani',
+};
+
 // Single source of truth for turning a possibly-missing/unsupported language
 // attribute into one of SUPPORTED_LANGS. Used at both places a call's
 // language gets decided (dispatch metadata and participant attributes) so
@@ -87,7 +102,7 @@ function buildSTT(lang) {
   // Punjabi call through Hindi transcription before this fix.
   console.log(`[stt] provider=sarvam model=saaras:v3 lang=${lang}`);
   return new sarvam.STT({
-    model: 'saaras:v3',
+    model: SARVAM_STT_MODEL,
     languageCode: lang,
   });
 }
@@ -111,13 +126,15 @@ function buildTTS(lang) {
       encoding: 'pcm_8000',
     });
   }
-  console.log(`[tts] provider=sarvam speaker=neha lang=${lang}`);
+  const speaker = SARVAM_SPEAKERS[lang] || SARVAM_SPEAKERS['hi-IN'];
+  console.log(`[tts] provider=sarvam model=${SARVAM_TTS_MODEL} speaker=${speaker} lang=${lang} pace=${TTS_PACE} sampleRate=${TTS_SAMPLE_RATE}`);
   return new sarvam.TTS({
-    model: 'bulbul:v3',
-    speaker: 'neha',
+    model: SARVAM_TTS_MODEL,
+    speaker,
     targetLanguageCode: lang,
-    pace: 1.0,
-    sampleRate: 8000,
+    pace: TTS_PACE,
+    sampleRate: TTS_SAMPLE_RATE,
+    temperature: TTS_TEMPERATURE,
   });
 }
 
@@ -364,9 +381,13 @@ export default defineAgent({
       // actual turn end in Hindi/Hinglish conversational cadence.
       turnDetection: new livekit.turnDetector.MultilingualModel(),
       preemptiveGeneration: true,
-      aecWarmupDuration: 500,
-      minInterruptionWords: 3,
-      minInterruptionDuration: 600,
+      // Keep the agent responsive on short PSTN turns. The interruption
+      // thresholds are deliberately modest: callers can correct the agent
+      // without having to fight through a full sentence, while short
+      // acknowledgements are not mistaken for interruptions.
+      aecWarmupDuration: 350,
+      minInterruptionWords: 2,
+      minInterruptionDuration: 350,
     });
 
     let terminalToolFired = false;
