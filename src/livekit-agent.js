@@ -227,24 +227,50 @@ async function loadProfileModule(profileId) {
 
 export default defineAgent({
   prewarm: async (proc) => {
-    proc.userData.vad = await silero.VAD.load({
-      sampleRate: 8000,
-      minSilenceDuration: 400,
-    });
-    const warmupHosts = [
-      'https://api.sarvam.ai/',
-      'https://api.elevenlabs.io/v1/models',
-      'https://api.openai.com/v1/models',
-    ];
-    await Promise.all(warmupHosts.map(async (url) => {
-      try {
-        const controller = new AbortController();
-        const t = setTimeout(() => controller.abort(), 4000);
-        await fetch(url, { method: 'HEAD', signal: controller.signal }).catch(() => {});
-        clearTimeout(t);
-      } catch { /* best-effort */ }
-    }));
-    console.log('[prewarm] TLS/DNS warmed for Sarvam + ElevenLabs + OpenAI');
+    // NOTHING HEAVY MAY BE AWAITED HERE.
+    //
+    // initializeProcessTimeout measures exactly this function. Loading the
+    // Silero VAD (onnxruntime) inside it is what made every runner miss the
+    // deadline: on 2026-09-20 prewarm finished 106s after the job arrived --
+    // 46s AFTER the 60s timeout had already fired -- so the framework
+    // orphaned the runner, nobody joined the room, and a real controlled
+    // test call to the founder's own phone rang into silence (job
+    // AJ_9vyUSmPewQX5; identical on AJ_iPUzEem4Jvyi two days earlier).
+    // Raising the timeout 10s -> 60s had already been tried and was not
+    // enough, because the cost is contention on a box sitting at ~91% RAM,
+    // and contention does not respect a deadline.
+    //
+    // So the load is STARTED here and awaited in entry() instead. The worker
+    // keeps idle processes prewarmed ahead of demand, so in practice the
+    // model is resident long before a call arrives; when one does, entry
+    // awaits an already-resolved promise. Readiness no longer waits on a
+    // model, which is the property that was actually broken.
+    const vadStarted = Date.now();
+    proc.userData.vadPromise = silero.VAD
+      .load({ sampleRate: 8000, minSilenceDuration: 400 })
+      .then((vad) => {
+        proc.userData.vad = vad;
+        console.log(`[prewarm] VAD ready after ${Date.now() - vadStarted}ms`);
+        return vad;
+      })
+      .catch((err) => {
+        // Surfaced, not swallowed: entry awaits this promise, and a silent
+        // rejection there would look like another mystery silent call.
+        console.error('[prewarm] VAD load FAILED:', err?.message || err);
+        throw err;
+      });
+
+    // Only the provider this agent actually uses. ElevenLabs and OpenAI were
+    // warmed here too, costing two pointless DNS+TLS handshakes per process
+    // after TTS_PROVIDER/VOICE_LLM_PROVIDER moved to Sarvam.
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 4000);
+      await fetch('https://api.sarvam.ai/', { method: 'HEAD', signal: controller.signal })
+        .catch(() => {});
+      clearTimeout(t);
+    } catch { /* best-effort */ }
+    console.log('[prewarm] ready (TLS warmed for Sarvam; VAD loading in background)');
   },
 
   entry: async (ctx) => {
@@ -310,8 +336,18 @@ export default defineAgent({
       }
     }
 
+    // prewarm no longer blocks on this (see the comment there). Normally the
+    // process has been idle long enough that this is already resolved and the
+    // await costs nothing; if a job landed on a freshly-forked process it
+    // waits here instead, which delays the greeting by a few seconds rather
+    // than orphaning the runner and leaving the caller in silence.
+    const vadWaitStarted = Date.now();
+    const vad = ctx.proc.userData.vad ?? (await ctx.proc.userData.vadPromise);
+    const vadWaitedMs = Date.now() - vadWaitStarted;
+    if (vadWaitedMs > 250) console.log(`[entry] waited ${vadWaitedMs}ms for VAD`);
+
     const session = new voice.AgentSession({
-      vad: ctx.proc.userData.vad,
+      vad,
       stt: buildSTT(initialLang),
       llm: buildLLM(),
       tts: buildTTS(initialLang),
