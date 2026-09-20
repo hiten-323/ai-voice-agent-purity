@@ -34,6 +34,7 @@ import {
   cli,
   defineAgent,
   ServerOptions,
+  stt as sttlib,
   voice,
 } from '@livekit/agents';
 import * as silero from '@livekit/agents-plugin-silero';
@@ -72,7 +73,11 @@ const SUPPORTED_LANGS = ['en-IN', 'hi-IN', 'pa-IN'];
 const TTS_PACE = Number(process.env.TTS_PACE || '1.05');
 const TTS_SAMPLE_RATE = Number(process.env.TTS_SAMPLE_RATE || '8000');
 const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.55');
-const SARVAM_STT_MODEL = process.env.SARVAM_STT_MODEL || 'saaras:v4';
+// saaras:v4 is NOT a model @livekit/agents-plugin-sarvam@1.2.6 knows: its
+// STTModels union is 'saaras:v3' | 'saaras:v2.5' | 'saarika:v2.5'. Shipping
+// v4 as the default would send an unsupported model on every call. The env
+// override stays, so the day the plugin gains v4 this is a config change.
+const SARVAM_STT_MODEL = process.env.SARVAM_STT_MODEL || 'saaras:v3';
 const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
 const SARVAM_SPEAKERS = {
   'hi-IN': process.env.SARVAM_HI_SPEAKER || 'shubh',
@@ -88,7 +93,7 @@ function normalizeLang(raw) {
   return SUPPORTED_LANGS.includes(raw) ? raw : 'hi-IN';
 }
 
-function buildSTT(lang) {
+function buildSTT(lang, vad) {
   if (lang === 'en-IN') {
     console.log(`[stt] provider=openai model=gpt-4o-transcribe lang=${lang}`);
     return new openai.STT({
@@ -100,11 +105,24 @@ function buildSTT(lang) {
   // Saaras v3 supports pa-IN directly (23-language set) — passing the real
   // code through rather than hardcoding hi-IN, which silently ran every
   // Punjabi call through Hindi transcription before this fix.
-  console.log(`[stt] provider=sarvam model=saaras:v3 lang=${lang}`);
-  return new sarvam.STT({
+  //
+  // REST + VAD segmentation, NOT the websocket. The plugin's streaming path
+  // asserts its input is exactly 16kHz/1ch and throws otherwise; a PSTN call
+  // arrives here at 24kHz, and neither the plugin nor the framework
+  // resamples for STT (audio_recognition just forwards the track's native
+  // rate). On the 2026-09-20 test call that threw
+  // "Expected 16000Hz/1ch, got 24000Hz/1ch" on every connect attempt, so not
+  // one word was ever transcribed — the agent had joined the room and still
+  // could not hear. stt.StreamAdapter is the path the plugin's own error
+  // message recommends: VAD cuts utterances, each is recognised over REST,
+  // and the sample rate stops mattering.
+  console.log(`[stt] provider=sarvam model=${SARVAM_STT_MODEL} lang=${lang} transport=rest+vad`);
+  const base = new sarvam.STT({
     model: SARVAM_STT_MODEL,
     languageCode: lang,
+    streaming: false,
   });
+  return new sttlib.StreamAdapter(base, vad);
 }
 
 // TTS provider factory. Provider choice is engine-level (cost/quality/outage
@@ -365,7 +383,7 @@ export default defineAgent({
 
     const session = new voice.AgentSession({
       vad,
-      stt: buildSTT(initialLang),
+      stt: buildSTT(initialLang, vad),
       llm: buildLLM(),
       tts: buildTTS(initialLang),
       // Re-enabled 2026-09-15: removed earlier the same day after "File not
