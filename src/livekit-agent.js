@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Glitch Voice — generic LiveKit voice agent worker (engine).
  *
  * Long-running worker process. Registers with LiveKit Cloud, subscribes to
@@ -85,10 +85,13 @@ const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.55');
 // override stays, so the day the plugin gains v4 this is a config change.
 const SARVAM_STT_MODEL = process.env.SARVAM_STT_MODEL || 'saaras:v3';
 const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
+// Defaults must stay female: purity-coffee-b2b welcome uses feminine
+// Hindi/Punjabi forms (rahi / sakti). Male defaults (shubh/ratan/mani)
+// caused the 2026-09-21 "male voice in a female script" failure.
 const SARVAM_SPEAKERS = {
-  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'shubh',
-  'en-IN': process.env.SARVAM_EN_SPEAKER || 'ratan',
-  'pa-IN': process.env.SARVAM_PA_SPEAKER || 'mani',
+  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'priya',
+  'en-IN': process.env.SARVAM_EN_SPEAKER || 'sophia',
+  'pa-IN': process.env.SARVAM_PA_SPEAKER || 'simran',
 };
 
 // Single source of truth for turning a possibly-missing/unsupported language

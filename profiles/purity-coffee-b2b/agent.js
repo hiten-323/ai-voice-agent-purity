@@ -312,14 +312,15 @@ export function buildSystemPrompt(v, lang) {
 
 export function buildWelcome(v, lang, env) {
   if (v.opening) return v.opening;
-  // Fallback only fires if founder_call_pipeline.OPENING_DISCLOSURE somehow
-  // didn't arrive in the payload — script_discloses() already validates the
-  // real one before dispatch, so this should be unreachable in practice.
+  // Fallback only if founder_call_pipeline.OPENING_DISCLOSURE did not
+  // arrive. Keep SHORT and permission-first (match OPENING_DISCLOSURE):
+  // a long intro+pitch+ask was cut off mid-line on PSTN. Feminine forms
+  // must stay aligned with SARVAM_*_SPEAKER female defaults (priya/sophia/simran).
   const fallbacks = {
-    'en-IN': 'Hello, this is an AI assistant calling on behalf of Pure Pantry Provisions. We supply coffee to cafes and businesses. Is this a good time for one quick question?',
-    'pa-IN': 'Sat sri akal, main Pure Pantry Provisions valon AI assistant bol rahi haan. Asi cafes te businesses nu coffee supply karde haan. Ki hun ik chhota jiha sawaal puch sakdi haan?',
+    'en-IN': 'Hello, this is an AI assistant calling on behalf of Purity Beans. Do you have a quick minute?',
+    'pa-IN': 'Sat sri akal, main Purity Beans valon AI assistant bol rahi haan. Ki tuhade kol ik chhota jiha minute hai?',
   };
-  return fallbacks[lang] || 'Namaste, main Pure Pantry Provisions ki taraf se AI assistant baat kar rahi hoon. Hum cafes aur businesses ko coffee supply karte hain. Kya ek chhota sa sawaal poochh sakti hoon?';
+  return fallbacks[lang] || 'Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon. Kya aapke paas ek chhota sa minute hai?';
 }
 
 export function buildTools(v) {
