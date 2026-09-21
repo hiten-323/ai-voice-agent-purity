@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Glitch Voice — generic LiveKit voice agent worker (engine).
  *
  * Long-running worker process. Registers with LiveKit Cloud, subscribes to
@@ -38,7 +38,13 @@ import {
   voice,
 } from '@livekit/agents';
 import * as silero from '@livekit/agents-plugin-silero';
-import * as livekit from '@livekit/agents-plugin-livekit';
+// Do NOT statically import @livekit/agents-plugin-livekit.
+// Its package entry registers English + multilingual EOU InferenceRunners on
+// import (see node_modules/.../turn_detector/index.js). Those runners load
+// ~460MB of ONNX into every job child even when TURN_DETECTOR=vad, which on
+// this Windows host made job executors unresponsive and left PSTN calls
+// ringing into silence (2026-09-21 personal test). Load it only when model
+// turn detection is explicitly requested.
 import * as sarvam from '@livekit/agents-plugin-sarvam';
 import * as elevenlabs from '@livekit/agents-plugin-elevenlabs';
 import * as openai from '@livekit/agents-plugin-openai';
@@ -381,6 +387,14 @@ export default defineAgent({
     const vadWaitedMs = Date.now() - vadWaitStarted;
     if (vadWaitedMs > 250) console.log(`[entry] waited ${vadWaitedMs}ms for VAD`);
 
+    // Optional model turn detector — dynamic import so the plugin's side-effect
+    // registration never runs on the default VAD path.
+    const turnDetectionOpts = {};
+    if (String(process.env.TURN_DETECTOR || 'vad').toLowerCase() === 'model') {
+      const livekit = await import('@livekit/agents-plugin-livekit');
+      turnDetectionOpts.turnDetection = new livekit.turnDetector.MultilingualModel();
+    }
+
     const session = new voice.AgentSession({
       vad,
       stt: buildSTT(initialLang, vad),
@@ -406,9 +420,7 @@ export default defineAgent({
       // end-of-utterance decisions the pipeline could not afford. Off by
       // default here, switchable per deployment: on a host with headroom
       // TURN_DETECTOR=model is the better answer for Hindi/Hinglish cadence.
-      ...(String(process.env.TURN_DETECTOR || 'vad').toLowerCase() === 'model'
-        ? { turnDetection: new livekit.turnDetector.MultilingualModel() }
-        : {}),
+      ...turnDetectionOpts,
       // Was true. It re-runs generation when the chat context changes and
       // logged "preemptive generation enabled but chat context or tools have
       // changed after onUserTurnCompleted" on the same call -- duplicated LLM
