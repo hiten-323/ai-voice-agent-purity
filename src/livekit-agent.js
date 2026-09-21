@@ -89,7 +89,7 @@ const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
 // Hindi/Punjabi forms (rahi / sakti). Male defaults (shubh/ratan/mani)
 // caused the 2026-09-21 "male voice in a female script" failure.
 const SARVAM_SPEAKERS = {
-  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'neha',
+  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'ritu',
   'en-IN': process.env.SARVAM_EN_SPEAKER || 'sophia',
   'pa-IN': process.env.SARVAM_PA_SPEAKER || 'simran',
 };
@@ -531,29 +531,34 @@ export default defineAgent({
     // whole completion and streams to TTS incrementally); tts.ttfbMs = time
     // to the first audio byte the caller actually hears.
     // Silence re-prompt: when LiveKit marks the user "away" (both sides
-    // quiet for userAwayTimeout seconds), repeat the last question once or
-    // twice instead of leaving dead air that makes the caller hang up.
+    // quiet for userAwayTimeout seconds), re-ask the LAST QUESTION only.
+    // session.say returns a SpeechHandle, not a Promise — never .catch it
+    // (that crashed the worker on 2026-09-21 and made silence re-ask "not work").
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       if (ev.newState !== 'away') return;
       if (terminalToolFired || voicemailDetected || outcomeReported) return;
-      if (!lastAssistantText) return;
-      if (silenceReprompts >= maxSilenceReprompts) {
-        console.log('[silence] max re-prompts reached — soft close');
-        const bye = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
-          ? 'Lagta hai ab baat mushkil hai. Baad mein call karungi. Dhanyavaad.'
-          : 'It seems like a bad time. I will try later. Thank you.';
-        session.say(bye, { allowInterruptions: true }).catch(() => {});
-        setTimeout(() => hangupNow('silence max re-prompts'), 4000);
-        return;
-      }
-      silenceReprompts += 1;
-      const nudge = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
-        ? `Kya aap sun rahe hain? ${lastAssistantText}`
-        : `Are you still there? ${lastAssistantText}`;
-      console.log(`[silence] re-prompt ${silenceReprompts}/${maxSilenceReprompts}: ${nudge.slice(0, 120)}`);
-      session.say(nudge, { allowInterruptions: true }).catch((err) => {
+      // Only nudge when we were waiting on a question, not after a statement.
+      const q = (lastAssistantText || '').trim();
+      if (!q || !q.includes('?')) return;
+      try {
+        if (silenceReprompts >= maxSilenceReprompts) {
+          console.log('[silence] max re-prompts reached — soft close');
+          const bye = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
+            ? 'Lagta hai ab baat mushkil hai. Baad mein call karungi. Dhanyavaad.'
+            : 'It seems like a bad time. I will try later. Thank you.';
+          session.say(bye, { allowInterruptions: true });
+          setTimeout(() => hangupNow('silence max re-prompts'), 4000);
+          return;
+        }
+        silenceReprompts += 1;
+        const nudge = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
+          ? `Kya aap sun rahe hain? ${q}`
+          : `Are you still there? ${q}`;
+        console.log(`[silence] re-prompt ${silenceReprompts}/${maxSilenceReprompts}: ${nudge.slice(0, 120)}`);
+        session.say(nudge, { allowInterruptions: true });
+      } catch (err) {
         console.warn('[silence] re-prompt failed:', err?.message || err);
-      });
+      }
     });
 
     session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {

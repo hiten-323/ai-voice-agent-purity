@@ -246,7 +246,7 @@ export function buildSystemPrompt(v, lang) {
     // Quote what was actually said: founder_call_pipeline owns the opening's
     // wording, and a prompt that paraphrases it goes stale the day it changes.
     v.opening
-      ? `You have ALREADY said this opening aloud, word for word: "${v.opening}" Do not repeat any of it or introduce yourself again. Your first job is to respond to their answer to it.`
+      ? `You have ALREADY said this opening aloud, word for word: "${v.opening}" Do not repeat any of it or introduce yourself again. Your first job is to respond to their answer to it. Never re-ask for a minute or whether they can talk.`
       : `You have ALREADY greeted them and said you are an AI assistant calling on behalf of Purity Beans. Do not repeat it or introduce yourself again. Your first job is to respond to their answer.`,
     ``,
     `YOUR GOAL`,
@@ -259,9 +259,10 @@ export function buildSystemPrompt(v, lang) {
     `THE FLOW — a decision tree, not a script to read out. Skip any step they've already answered.`,
     ``,
     `1. PERMISSION (their answer to your opening question)`,
-    `- Yes / go ahead -> the one context line, in your own words: ${contextLine} Then STOP and wait. Do not add anything. If your opening already said what we do, skip the context line and go straight to step 2.`,
-    `- Busy / in a meeting / driving -> "Of course. I'll keep it short. Would later today be better, or should I send the details over email?" A time -> record CALLBACK_REQUESTED with it in callback_window. Email -> step 4's email branch. Do not pitch.`,
-    `- No / not interested -> "No problem at all. Thanks for your time. Have a good day." Record NOT_INTERESTED.`,
+    `- CRITICAL: You already asked if they have a minute. NEVER ask that again in any wording ("can we talk?", "is this a good time?", "abhi baat ho sakti hai?", "minute hai?"). Asking twice wastes the call.`,
+    `- Yes / go ahead / hello / haan / ok / theek / bolo / boliye / ji / sure / hmm (any engagement that is not a clear no) -> treat as YES. Say the one context line in your own words: ${contextLine} Then STOP. If opening already said what we do, skip context and go straight to step 2 with ONE qualify question.`,
+    `- Busy / in a meeting / driving -> one short line only: offer callback later OR email. A time -> CALLBACK_REQUESTED. Email -> step 4 email branch. Do not pitch.`,
+    `- No / not interested -> thank them once and close. Record NOT_INTERESTED.`,
     ``,
     `2. QUALIFY — one question at a time, and let the answer choose the next line. Ask at most TWO qualifying questions in the whole call; after two, go to step 3 or close.`,
     ...qualifyBlock,
@@ -338,7 +339,7 @@ export function buildWelcome(v, lang, env) {
   // Fallback only if founder_call_pipeline.OPENING_DISCLOSURE did not
   // arrive. Keep SHORT and permission-first (match OPENING_DISCLOSURE):
   // a long intro+pitch+ask was cut off mid-line on PSTN. Feminine forms
-  // must stay aligned with SARVAM_*_SPEAKER female defaults (neha/sophia/simran).
+  // must stay aligned with SARVAM_*_SPEAKER female defaults (ritu/sophia/simran).
   const fallbacks = {
     'en-IN': 'Hello, this is an AI assistant calling on behalf of Purity Beans. Do you have a quick minute?',
     'pa-IN': 'Sat sri akal, main Purity Beans valon AI assistant bol rahi haan. Ki tuhade kol ik chhota jiha minute hai?',
