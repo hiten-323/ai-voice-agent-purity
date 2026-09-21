@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Trigger an outbound voice call via LiveKit Cloud + Vobiz SIP trunk.
  *
  * Resolves a Shopify order to its real context, then asks LiveKit to:
@@ -11,7 +11,7 @@
  * via ctx.waitForParticipant().attributes inside src/livekit-agent.js.
  */
 
-import { SipClient, AgentDispatchClient, EgressClient, EncodedFileType, EncodedFileOutput, EncodingOptions, AudioCodec, S3Upload, GCPUpload } from 'livekit-server-sdk';
+import { SipClient, AgentDispatchClient, RoomServiceClient, EgressClient, EncodedFileType, EncodedFileOutput, EncodingOptions, AudioCodec, S3Upload, GCPUpload } from 'livekit-server-sdk';
 
 import { pickTrunkForPhone } from './lib/trunks.js';
 
@@ -24,6 +24,35 @@ const LK_SECRET           = process.env.LIVEKIT_API_SECRET;
 const LK_SIP_TRUNK_ID     = process.env.LIVEKIT_SIP_TRUNK_ID;
 const LK_SIP_TRUNK_ID_TWILIO = process.env.LIVEKIT_SIP_TRUNK_ID_TWILIO;
 const LK_AGENT_NAME       = process.env.LIVEKIT_AGENT_NAME || 'ai-voice-agent-priya';
+
+// Refuse to ring the PSTN leg until a LiveKit agent participant is actually in
+// the room. createDispatch is async assignment; without this wait the SIP call
+// can answer while the job executor is still loading (or has gone unresponsive),
+// which is exactly the "phone rang, nobody spoke" failure mode on 2026-09-21.
+async function waitForAgentInRoom(room, timeoutMs = Number(process.env.AGENT_JOIN_TIMEOUT_MS || 45000)) {
+  const rooms = new RoomServiceClient(LK_URL, LK_KEY, LK_SECRET);
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = '';
+  while (Date.now() < deadline) {
+    try {
+      const parts = await rooms.listParticipants(room);
+      const agent = parts.find((p) => {
+        const kind = String(p.kind ?? '');
+        const id = String(p.identity ?? '');
+        return kind.includes('AGENT') || kind === '3' || id.startsWith('agent-') || id.includes(LK_AGENT_NAME);
+      });
+      if (agent) {
+        console.log(`[trigger-call] agent joined room=${room} identity=${agent.identity} kind=${agent.kind} after ${timeoutMs - (deadline - Date.now())}ms`);
+        return agent;
+      }
+    } catch (e) {
+      lastErr = e?.message || String(e);
+    }
+    await new Promise((r) => setTimeout(r, 750));
+  }
+  throw new Error(`agent ${LK_AGENT_NAME} did not join room ${room} within ${timeoutMs}ms${lastErr ? ` (last: ${lastErr})` : ''} — refusing to ring customer into silence`);
+}
+
 
 // ── Egress (training-data audio capture) ─────────────────────────────────
 // RECORDING_BACKEND    = 'gcp' | 's3' | 'r2' | '' (off)
@@ -194,6 +223,10 @@ export async function triggerLivekitCall(params) {
       entity_name: identity.entityName,
     }),
   });
+
+  
+  console.log(`[trigger-call] dispatched agent=${LK_AGENT_NAME} room=${room} — waiting for agent join before SIP`);
+  await waitForAgentInRoom(room);
 
   // Start audio egress 10 s after dispatch — gives the agent time to join the
   // room and publish its audio track, which resolves the "no supported codec"
