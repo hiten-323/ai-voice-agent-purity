@@ -338,7 +338,7 @@ export function buildWelcome(v, lang, env) {
   // Fallback only if founder_call_pipeline.OPENING_DISCLOSURE did not
   // arrive. Keep SHORT and permission-first (match OPENING_DISCLOSURE):
   // a long intro+pitch+ask was cut off mid-line on PSTN. Feminine forms
-  // must stay aligned with SARVAM_*_SPEAKER female defaults (priya/sophia/simran).
+  // must stay aligned with SARVAM_*_SPEAKER female defaults (neha/sophia/simran).
   const fallbacks = {
     'en-IN': 'Hello, this is an AI assistant calling on behalf of Purity Beans. Do you have a quick minute?',
     'pa-IN': 'Sat sri akal, main Purity Beans valon AI assistant bol rahi haan. Ki tuhade kol ik chhota jiha minute hai?',

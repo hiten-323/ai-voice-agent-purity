@@ -76,7 +76,7 @@ const SUPPORTED_LANGS = ['en-IN', 'hi-IN', 'pa-IN'];
 // conversational pace, telephony-compatible sample rate, and Indian-language
 // voices chosen per language. Every value remains environment-overridable so
 // a later A/B test does not require another code change.
-const TTS_PACE = Number(process.env.TTS_PACE || '0.95');
+const TTS_PACE = Number(process.env.TTS_PACE || '1.1');
 const TTS_SAMPLE_RATE = Number(process.env.TTS_SAMPLE_RATE || '8000');
 const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.7');
 // saaras:v4 is NOT a model @livekit/agents-plugin-sarvam@1.2.6 knows: its
@@ -89,7 +89,7 @@ const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
 // Hindi/Punjabi forms (rahi / sakti). Male defaults (shubh/ratan/mani)
 // caused the 2026-09-21 "male voice in a female script" failure.
 const SARVAM_SPEAKERS = {
-  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'priya',
+  'hi-IN': process.env.SARVAM_HI_SPEAKER || 'neha',
   'en-IN': process.env.SARVAM_EN_SPEAKER || 'sophia',
   'pa-IN': process.env.SARVAM_PA_SPEAKER || 'simran',
 };
@@ -436,12 +436,23 @@ export default defineAgent({
       aecWarmupDuration: 250,
       minInterruptionWords: 1,
       minInterruptionDuration: 250,
+      // After both sides go silent, mark the user "away" so we can re-ask.
+      // Default LiveKit value is 15s — too long on a cold PSTN call (founder
+      // hung up waiting). Env is seconds; null disables.
+      userAwayTimeout: Number(process.env.SILENCE_REPROMPT_SECS || '6'),
     });
 
     let terminalToolFired = false;
     let hangupTimer = null;
     let voicemailDetected = false;
     let userTurnCount = 0;
+    // Last question we asked the caller, and how many times we have nudged
+    // them after silence. Without this, a no-answer leaves dead air until
+    // they hang up (2026-09-21 personal test).
+    let lastAssistantText = '';
+    let silenceReprompts = 0;
+    const maxSilenceReprompts = Number(process.env.SILENCE_REPROMPT_MAX || '2');
+
     // Set the moment ANY outcome — record_call_outcome or the engine's own
     // VOICEMAIL report — is on its way to Python. Checked on session Close
     // so a dropped call, a crash, or the caller just hanging up mid-sentence
@@ -472,6 +483,7 @@ export default defineAgent({
       const transcript = ev.transcript || '';
       console.log(`[user] ${transcript}`);
       userTurnCount++;
+      silenceReprompts = 0;
 
       if (!voicemailDetected && userTurnCount <= 4) {
         const matched = detectVoicemail(transcript);
@@ -518,6 +530,32 @@ export default defineAgent({
     // time to the model's first token (not durationMs, which includes the
     // whole completion and streams to TTS incrementally); tts.ttfbMs = time
     // to the first audio byte the caller actually hears.
+    // Silence re-prompt: when LiveKit marks the user "away" (both sides
+    // quiet for userAwayTimeout seconds), repeat the last question once or
+    // twice instead of leaving dead air that makes the caller hang up.
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      if (ev.newState !== 'away') return;
+      if (terminalToolFired || voicemailDetected || outcomeReported) return;
+      if (!lastAssistantText) return;
+      if (silenceReprompts >= maxSilenceReprompts) {
+        console.log('[silence] max re-prompts reached — soft close');
+        const bye = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
+          ? 'Lagta hai ab baat mushkil hai. Baad mein call karungi. Dhanyavaad.'
+          : 'It seems like a bad time. I will try later. Thank you.';
+        session.say(bye, { allowInterruptions: true }).catch(() => {});
+        setTimeout(() => hangupNow('silence max re-prompts'), 4000);
+        return;
+      }
+      silenceReprompts += 1;
+      const nudge = (initialLang === 'hi-IN' || initialLang === 'pa-IN')
+        ? `Kya aap sun rahe hain? ${lastAssistantText}`
+        : `Are you still there? ${lastAssistantText}`;
+      console.log(`[silence] re-prompt ${silenceReprompts}/${maxSilenceReprompts}: ${nudge.slice(0, 120)}`);
+      session.say(nudge, { allowInterruptions: true }).catch((err) => {
+        console.warn('[silence] re-prompt failed:', err?.message || err);
+      });
+    });
+
     session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
       const m = ev.metrics;
       if (m.type === 'eou_metrics') {
@@ -536,6 +574,12 @@ export default defineAgent({
       const text = ev.item.textContent ?? '';
       console.log(`[assistant] ${text.slice(0, 200)}`);
       postTurn({ role: 'assistant', text });
+      if (text.trim()) {
+        lastAssistantText = text.trim();
+        // A fresh agent turn resets the silence nudge counter so a new
+        // question still gets its own two chances.
+        silenceReprompts = 0;
+      }
 
       if (terminalToolFired && !hangupTimer) {
         const rn = ctx.room?.name;
@@ -667,7 +711,9 @@ export default defineAgent({
     await session.start({ agent: realAgent, room: ctx.room });
     console.log(`[cold-start] serial-start: ${Date.now() - coldStartMs}ms (TLS prewarmed)`);
 
-    session.say(profileMod.buildWelcome(v, lang, process.env), { allowInterruptions: false });
+    const welcomeText = profileMod.buildWelcome(v, lang, process.env);
+    lastAssistantText = welcomeText;
+    session.say(welcomeText, { allowInterruptions: false });
   },
 });
 
