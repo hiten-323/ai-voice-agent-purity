@@ -76,9 +76,9 @@ const SUPPORTED_LANGS = ['en-IN', 'hi-IN', 'pa-IN'];
 // conversational pace, telephony-compatible sample rate, and Indian-language
 // voices chosen per language. Every value remains environment-overridable so
 // a later A/B test does not require another code change.
-const TTS_PACE = Number(process.env.TTS_PACE || '1.05');
+const TTS_PACE = Number(process.env.TTS_PACE || '0.95');
 const TTS_SAMPLE_RATE = Number(process.env.TTS_SAMPLE_RATE || '8000');
-const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.55');
+const TTS_TEMPERATURE = Number(process.env.TTS_TEMPERATURE || '0.7');
 // saaras:v4 is NOT a model @livekit/agents-plugin-sarvam@1.2.6 knows: its
 // STTModels union is 'saaras:v3' | 'saaras:v2.5' | 'saarika:v2.5'. Shipping
 // v4 as the default would send an unsupported model on every call. The env
@@ -180,7 +180,7 @@ function buildTTS(lang) {
 function buildLLM() {
   const provider = (process.env.VOICE_LLM_PROVIDER || 'sarvam').toLowerCase();
   const temperature = 0.6;
-  const maxCompletionTokens = 60;   // one conversational turn, not an essay
+  const maxCompletionTokens = 35;   // short spoken turns; was 60 and produced essay-length PSTN lines
 
   if (provider === 'sarvam') {
     // Sarvam serves STT, TTS and the LLM, so the whole stack is
@@ -433,9 +433,9 @@ export default defineAgent({
       // thresholds are deliberately modest: callers can correct the agent
       // without having to fight through a full sentence, while short
       // acknowledgements are not mistaken for interruptions.
-      aecWarmupDuration: 350,
-      minInterruptionWords: 2,
-      minInterruptionDuration: 350,
+      aecWarmupDuration: 250,
+      minInterruptionWords: 1,
+      minInterruptionDuration: 250,
     });
 
     let terminalToolFired = false;

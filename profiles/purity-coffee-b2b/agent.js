@@ -175,22 +175,40 @@ export function buildSystemPrompt(v, lang) {
     ? v.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
     : '(no questions were provided for this call — ask whether they buy coffee commercially, then whether the founder may call them.)';
 
-  const where = v.city ? ` around ${v.city}` : '';
+  const whereEn = v.city ? ` around ${v.city}` : '';
+  const whereHi = v.city ? ` ${v.city} ke aas-paas` : '';
   const trade = isTradeLead(v);
-  const contextLine = trade
-    ? `"Thank you. We're currently connecting with distributors in the instant coffee category${where}, and I wanted to see if this is something you'd be open to exploring."`
-    : `"Thank you. We supply instant coffee to cafes and businesses${where}, and I wanted to see if it could be useful for you."`;
-  const qualifyBlock = trade
-    ? [
-        `- Ask: "Do you currently distribute any instant coffee brands?"`,
-        `- If yes: "Got it. And are you open to adding another brand if the product and commercial terms make sense?"`,
-        `- If no: "Understood. Would instant coffee be a category you'd consider adding?" If that is also no: "Are you distributing any adjacent grocery or beverage categories where instant coffee could fit?" If yes, move to details; if no, close politely.`,
-      ]
-    : [
-        `- Ask: "Do you use instant coffee at the moment?"`,
-        `- If yes: "Got it. Who do you usually get it from?" — then, only if something they say sounds like a real problem (price, consistency, a supplier letting them down), one short follow-up on that thing alone.`,
-        `- If no: "Understood. Is coffee something you serve or keep for staff at all?" If not, close politely — do not try to create a need.`,
-      ];
+  const hindi = (lang === 'hi-IN' || lang === 'pa-IN');
+  const contextLine = hindi
+    ? (trade
+      ? `"Dhanyavaad. Hum distributors se instant coffee pe baat kar rahe hain${whereHi}. Kya explore karna chahenge?"`
+      : `"Dhanyavaad. Hum cafes aur businesses ko instant coffee supply karte hain${whereHi}. Kya yeh useful ho sakta hai?"`)
+    : (trade
+      ? `"Thank you. We're currently connecting with distributors in the instant coffee category${whereEn}, and I wanted to see if this is something you'd be open to exploring."`
+      : `"Thank you. We supply instant coffee to cafes and businesses${whereEn}, and I wanted to see if it could be useful for you."`);
+  const qualifyBlock = hindi
+    ? (trade
+      ? [
+          `- Ask: "Kya aap abhi koi instant coffee brand distribute karte hain?"`,
+          `- If yes: "Theek hai. Terms theek hon to kya ek aur brand add kar sakte hain?"`,
+          `- If no: "Samajh gayi. Instant coffee add karne ka soch rahe hain?" If also no, close politely.`,
+        ]
+      : [
+          `- Ask: "Kya aap abhi instant coffee use karte hain?"`,
+          `- If yes: "Theek hai. Usually kahan se lete hain?" Then at most one short follow-up if they name a real problem.`,
+          `- If no: "Samajh gayi. Coffee staff ke liye rakhte hain?" If not, close politely.`,
+        ])
+    : (trade
+      ? [
+          `- Ask: "Do you currently distribute any instant coffee brands?"`,
+          `- If yes: "Got it. And are you open to adding another brand if the product and commercial terms make sense?"`,
+          `- If no: "Understood. Would instant coffee be a category you'd consider adding?" If that is also no: "Are you distributing any adjacent grocery or beverage categories where instant coffee could fit?" If yes, move to details; if no, close politely.`,
+        ]
+      : [
+          `- Ask: "Do you use instant coffee at the moment?"`,
+          `- If yes: "Got it. Who do you usually get it from?" — then, only if something they say sounds like a real problem (price, consistency, a supplier letting them down), one short follow-up on that thing alone.`,
+          `- If no: "Understood. Is coffee something you serve or keep for staff at all?" If not, close politely — do not try to create a need.`,
+        ]);
 
   // What the record says, so the agent never has to improvise a fact about
   // the business or about how we reached it. Each line states its own
@@ -218,9 +236,10 @@ export function buildSystemPrompt(v, lang) {
     : '';
 
   const languageLine = {
-    'en-IN': 'Speak Indian English throughout.',
-    'pa-IN': 'Speak Punjabi, mixing in English business terms naturally — this is normal for a B2B call in Punjab. If Punjabi ever feels forced for a specific phrase, Hindi/Hinglish is an acceptable fallback for that phrase only.',
-  }[lang] || 'Speak Hindi, mixing in English business terms naturally (Hinglish) — this is normal for a B2B call in India.';
+    'en-IN': 'Speak Indian English throughout. One short sentence per turn.',
+    'pa-IN': 'Speak Punjabi throughout. One short sentence per turn. English only for brand names and numbers.',
+    'hi-IN': 'Speak Hindi throughout — spoken Hindi a native caller would use. English ONLY for the brand name Purity Beans and for digits/emails. Never answer a Hindi caller in full English. One short sentence per turn (max ~12 words).',
+  }[lang] || 'Speak Hindi throughout. English only for brand names and numbers. One short sentence per turn.';
 
   return [
     `You are on a short, disclosed AI call on behalf of Purity Beans, an instant coffee brand from Pure Pantry Provisions. The call is with ${v.company || 'a business'}${v.city ? ` in ${v.city}` : ''}.`,
@@ -249,8 +268,10 @@ export function buildSystemPrompt(v, lang) {
     `Reference points if you need them, in your own words (never read them as a list):`,
     questionsBlock,
     ``,
-    `3. INTEREST -> DETAILS. The moment they sound open ("yes", "maybe", "send it over", "what's the price"), stop qualifying. Don't sell on the call:`,
-    `"Great. Rather than taking up your time on the call, I can have our catalogue and pricing shared with you. Would WhatsApp or email be more convenient?"`,
+    `3. INTEREST -> DETAILS. The moment they sound open, stop qualifying. Don't sell on the call:`,
+    hindi
+      ? `"Bahut accha. Call pe time nahi lungi — catalogue aur pricing bhej deti hoon. WhatsApp theek hai ya email?"`
+      : `"Great. Rather than taking up your time on the call, I can have our catalogue and pricing shared with you. Would WhatsApp or email be more convenient?"`,
     `Never push WhatsApp. Offer both and let them choose.`,
     ``,
     `4. CHANNEL AND CONSENT`,
@@ -288,7 +309,9 @@ export function buildSystemPrompt(v, lang) {
     `- If they hesitate ("hmm", "not sure", "let me think") -> don't push. Offer to send the details so they can look in their own time.`,
     `- Never say the same sentence twice. If they didn't catch something, say it again shorter, in different words.`,
     `- Don't add fake hesitation ("um", "uh") or artificial pauses — naturalness comes from what you choose to say, not from imitating disfluency.`,
-    `- Match their language. If they answer in Hindi/Hinglish, follow naturally in Hindi/Hinglish — don't mechanically translate an English sentence structure. Business words (coffee, supplier, pricing, quality, sample, founder, cafe, hotel, restaurant) can stay in English inside a Hindi sentence; that's normal, not a language switch.`,
+    `- LANGUAGE LOCK: follow languageLine above for the whole call. Do not flip to English mid-call because an example in this prompt is English.`,
+    `- Ambiguous short replies ("haan", "ye", "hmm", noise): ask one clarifying question — do not treat them as a firm yes.`,
+    `- BREVITY: one question OR one statement per turn, under ~12 words. Never stack catalogue + WhatsApp + email in one turn.`,
     ``,
     `RECORDING THE OUTCOME`,
     `When the conversation reaches a clear result, call record_call_outcome exactly once, near the end, with the outcome that best matches what happened. "Sounds interesting" on its own is not a finished outcome — if there's genuine relevance, ask for a next step before the call ends, and record whichever of these actually happened:`,
