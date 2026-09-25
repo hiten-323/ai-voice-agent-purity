@@ -535,8 +535,19 @@ export default defineAgent({
     const lang = ctxMut.lang;
     console.log(`[livekit-agent] profile=${ctxMut.profileId} call for ${v.customer_name || '(no name)'} / ${v.order_number || attrs.entity_ref || '-'} lang=${lang}`);
 
+    // Learning is fetched once before the agent starts. It is advisory only;
+    // a timeout or API failure must never delay or block a call.
+    let learning = null;
+    if (typeof profileMod.fetchLearningHints === 'function') {
+      try {
+        learning = await profileMod.fetchLearningHints(v);
+      } catch (err) {
+        console.warn('[learning] advisory fetch failed:', err.message);
+      }
+    }
+
     const realAgent = new voice.Agent({
-      instructions: profileMod.buildSystemPrompt(v, lang),
+      instructions: profileMod.buildSystemPrompt(v, lang, learning),
       tools:        profileMod.buildTools(v, { WEBHOOK_BASE, TOOL_SECRET }),
     });
 
