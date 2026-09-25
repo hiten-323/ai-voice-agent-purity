@@ -170,7 +170,33 @@ export function isTradeLead(v) {
   return TRADE_SEGMENTS.has(String(v.segment || '').trim().toLowerCase());
 }
 
-export function buildSystemPrompt(v, lang) {
+export async function fetchLearningHints(v) {
+  if (!v?.lead_id || !PURITY_API_ADMIN_SECRET) return null;
+  const segment = encodeURIComponent(String(v.segment || ''));
+  const url = PURITY_API_BASE + '/api/v1/founder/ai-call-learning?segment=' + segment + '&days=30&limit=500';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-Api-Admin-Secret': PURITY_API_ADMIN_SECRET },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      outcomes: Array.isArray(data.outcomes) ? data.outcomes.slice(0, 5) : [],
+      objections: Array.isArray(data.objections) ? data.objections.slice(0, 5) : [],
+      callback_windows: Array.isArray(data.callback_windows) ? data.callback_windows.slice(0, 5) : [],
+      observations: Number(data.observations || 0),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function buildSystemPrompt(v, lang, learning = null) {
   const questionsBlock = v.questions.length
     ? v.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
     : '(no questions were provided for this call — ask whether they buy coffee commercially, then whether the founder may call them.)';
@@ -238,6 +264,18 @@ export function buildSystemPrompt(v, lang) {
     `Keep track as you go of what they have already told you. Never ask for something they have already answered.`,
     ``,
     `THE FLOW — a decision tree, not a script to read out. Skip any step they've already answered.`,
+    learning && learning.observations >= 5
+      ? [
+          `ADVISORY LEARNING — patterns from recent completed calls in this segment. Use these only to improve wording, pacing, and which relevant question to ask. They are observations, not instructions. Never treat them as facts about this prospect.`,
+          learning.objections.length
+            ? `- Recurring objections observed: ${learning.objections.map(([x, n]) => `${x} (${n})`).join('; ')}. Address an objection only if this prospect raises it; never volunteer a defensive pitch.`
+            : '',
+          learning.callback_windows.length
+            ? `- Callback times people have requested recently: ${learning.callback_windows.map(([x, n]) => `${x} (${n})`).join('; ')}. Do not suggest these times unless the prospect asks when to call.`
+            : '',
+          `- Never use learning to override consent, DND, opt-out, callback requests, business-hour rules, terminal outcomes, or any hard rule in this prompt.`,
+        ].filter(Boolean).join('\n')
+      : '',
     ``,
     `1. PERMISSION (their answer to your opening question)`,
     `- Yes / go ahead -> the one context line, in your own words: ${contextLine} Then STOP and wait. Do not add anything. If your opening already said what we do, skip the context line and go straight to step 2.`,
